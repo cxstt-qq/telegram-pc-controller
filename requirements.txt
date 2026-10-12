@@ -1,0 +1,5 @@
+requests[socks]>=2.31,<3
+psutil>=5.9,<8
+mss>=9,<11
+Pillow>=10,<13
+pyperclip>=1.9,<2

@@ -586,10 +586,10 @@ class Bot:
     def ram_home(self, chat_id: int, message_id: int | None = None) -> None:
         keyboard = inline_keyboard([
             [("📋 Аккаунты", "ram:list"), ("🔄 Обновить", "ram:refresh")],
-            [("🚫 Заблокированные", "ram:blocked")],
             [("⬅️ Главное меню", "menu")],
         ])
         self.ram_panel(chat_id, "🤖 Roblox Account Manager\n\nВыбери аккаунты для просмотра и управления.\n"
+                       "Открой аккаунт, чтобы увидеть его описание и кнопки управления, включая список блокировок.\n"
                        "Cookies и токены сессий бот намеренно не запрашивает.", keyboard, message_id)
 
     def ram_list(self, chat_id: int, group: str = "", page: int = 0, message_id: int | None = None) -> None:

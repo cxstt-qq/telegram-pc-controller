@@ -25,6 +25,7 @@ class RamApi:
     # The API explicitly labels cookie/session-token methods dangerous. They
     # are intentionally not exposed to Telegram.
     def __init__(self, port: int, password: str | None = None):
+        self.port = port
         self.base = f"http://127.0.0.1:{port}/"
         self.password = password
         self.session = requests.Session()
@@ -48,7 +49,8 @@ class RamApi:
                 response = self.session.get(url, params=params, timeout=8)
         except requests.RequestException as exc:
             raise RamApiError(
-                "RAM API недоступен на localhost. Проверь, что RAM запущен и EnableWebServer включён."
+                f"RAM API недоступен на 127.0.0.1:{self.port}. "
+                "Проверь, что RAM запущен, EnableWebServer включён и в RAM и .env указан один порт."
             ) from None
         if response.status_code == 401:
             raise RamApiError("RAM отклонил запрос: проверь пароль и разрешение метода в настройках.")

@@ -610,7 +610,10 @@ class Bot:
             for i, account in enumerate(filtered[page_now * page_size:(page_now + 1) * page_size],
                                          start=page_now * page_size):
                 label = account["Username"] + (f" · {account['Alias']}" if account["Alias"] else "")
-                rows.append([(label[:60], f"ram:a:{nonce}:{i}")])
+                description = account["Description"].replace("\n", " ").strip()
+                description_button = ("📝 " + (description[:18] if description else "добавить описание"))
+                rows.append([(label[:42], f"ram:a:{nonce}:{i}"),
+                             (description_button[:32], f"ram:d:{nonce}:{i}")])
             nav = []
             if page_now:
                 nav.append(("◀️", f"ram:p:{nonce}:{page_now - 1}"))
@@ -1092,6 +1095,19 @@ class Bot:
         elif data.startswith("ram:a:"):
             _, _, nonce, index = data.split(":", 3)
             self.ram_account_card(chat_id, nonce, int(index), query.get("message", {}).get("message_id"))
+        elif data.startswith("ram:d:"):
+            _, _, nonce, raw_index = data.split(":", 3)
+            state = self.ram_state.get(chat_id, {})
+            index = int(raw_index)
+            if state.get("nonce") == nonce and index < len(state.get("accounts", [])):
+                account = state["accounts"][index]
+                self.ram_selected[chat_id] = account["Username"]
+                self.pending[chat_id] = "ram:description"
+                current = account["Description"] or "(пусто)"
+                self.send(chat_id, f"Пришли новое описание для {account['Username']}. Можно несколькими строками.\n"
+                          f"Текущее описание: {current[:700]}\n/cancel — отмена.")
+            else:
+                self.send(chat_id, "Список устарел. Нажми «Обновить» и повтори.")
         elif data == "ram:reload":
             self.ram_reload_card(chat_id, query.get("message", {}).get("message_id"))
         elif data == "ram:fields":

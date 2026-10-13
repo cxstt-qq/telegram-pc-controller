@@ -68,7 +68,7 @@ def menu() -> dict:
         [("🖱 Управление", "input"), ("🔎 Найти текст", "prompt:find")],
         [("⌨️ CMD", "console:on"), ("🚀 Запуск", "launches")],
         [("▶️ Фарм", "scenario:start"), ("⏹ Стоп фарма", "scenario:stop")],
-        [("👥 Аккаунты RAM", "ram:accounts"), ("🚀 Запуск RAM", "prompt:ram:launch")],
+        [("🤖 Roblox Account Manager", "ram:open")],
         [("📝 Текстовый файл", "prompt:file:get")],
         [("📊 Система", "system"), ("📜 Журнал", "logs")],
         [("🛑 Стоп", "stop"), ("❓ Помощь", "help")],
@@ -90,8 +90,19 @@ HELP = """Все команды бота:
 /scenario start|stop — запустить фарм или остановить его, закрыв прочие программы.
 /file get ПУТЬ — отправить текстовый файл из ПК в Telegram для редактирования.
 /file save ПУТЬ — ждать загруженный текстовый документ и заменить файл; создаёт .bak.
-/ram accounts [группа] — список имён аккаунтов RAM (нужны разрешение GetAccounts и пароль API).
+/ram — открыть вкладку Roblox Account Manager.
+/ram accounts [группа] — показать аккаунты RAM с описаниями, можно указать группу.
 /ram launch ИМЯ PlaceId [JobId] — запустить аккаунт RAM в указанную игру/сервер.
+/ram vip PlaceId [JobId] — запустить выбранный аккаунт в VIP-сервер.
+/ram server PlaceId [JobId] — назначить сервер выбранному аккаунту.
+/ram recommended PlaceId — назначить рекомендованный сервер.
+/ram follow ИМЯ — следовать за пользователем из выбранного аккаунта.
+/ram alias|description|append ТЕКСТ — изменить алиас/описание или дописать описание.
+/ram fieldset ИМЯ ТЕКСТ — добавить или изменить поле выбранного аккаунта.
+/ram fieldremove ИМЯ — удалить поле после подтверждения.
+/ram block|unblock UserId — блокировать или разблокировать пользователя.
+/ram blocked — показать список блокировок; /ram unblock-all — снять все после подтверждения.
+/ram avatar JSON — применить JSON аватара к выбранному аккаунту.
 /click [right|middle|double] X Y — ЛКМ по умолчанию, ПКМ, средний или двойной клик.
 /move X Y — навести курсор без нажатия и дождаться подсказки на скриншоте.
 /drag X1 Y1 X2 Y2 — перетащить от первой точки ко второй.
@@ -141,6 +152,9 @@ class Bot:
         self.window_list_state: dict[int, tuple[int, int, bool]] = {}
         self.app_results: dict[int, tuple[str, list[AppEntry], str]] = {}
         self.ram_api = RamApi(config.ram_api_port, config.ram_api_password)
+        self.ram_state: dict[int, dict] = {}
+        self.ram_selected: dict[int, str] = {}
+        self.ram_confirm: dict[int, tuple[str, str, str]] = {}
 
     def send(self, chat_id: int, text: str, keyboard: dict | None = None) -> int | None:
         try:
@@ -560,6 +574,137 @@ class Bot:
         subprocess.Popen(["shutdown", "/r" if operation == "reboot" else "/s", "/t", "5"],
                          creationflags=subprocess.CREATE_NO_WINDOW)
 
+    def ram_panel(self, chat_id: int, text: str, keyboard: dict, message_id: int | None = None) -> None:
+        if message_id:
+            try:
+                self.api.edit_message(chat_id, message_id, text, keyboard)
+                return
+            except TelegramError:
+                pass
+        self.send(chat_id, text, keyboard)
+
+    def ram_home(self, chat_id: int, message_id: int | None = None) -> None:
+        keyboard = inline_keyboard([
+            [("📋 Аккаунты", "ram:list"), ("🔄 Обновить", "ram:refresh")],
+            [("🚫 Заблокированные", "ram:blocked")],
+            [("⬅️ Главное меню", "menu")],
+        ])
+        self.ram_panel(chat_id, "🤖 Roblox Account Manager\n\nВыбери аккаунты для просмотра и управления.\n"
+                       "Cookies и токены сессий бот намеренно не запрашивает.", keyboard, message_id)
+
+    def ram_list(self, chat_id: int, group: str = "", page: int = 0, message_id: int | None = None) -> None:
+        def load() -> str:
+            accounts = self.ram_api.accounts()
+            groups = sorted({item["Group"] for item in accounts}, key=str.casefold)
+            filtered = [item for item in accounts if not group or item["Group"].casefold() == group.casefold()]
+            page_size = 8
+            page_count = max(1, (len(filtered) + page_size - 1) // page_size)
+            page_now = max(0, min(page, page_count - 1))
+            nonce = secrets.token_hex(3)
+            self.ram_state[chat_id] = {"nonce": nonce, "accounts": filtered, "groups": groups,
+                                       "group": group, "page": page_now, "message_id": message_id}
+            rows: list[list[tuple[str, str]]] = []
+            group_buttons = [("Все группы", f"ram:g:{nonce}:*")]
+            group_buttons += [(name[:24], f"ram:g:{nonce}:{i}") for i, name in enumerate(groups[:7])]
+            rows.extend([group_buttons[i:i + 2] for i in range(0, len(group_buttons), 2)])
+            for i, account in enumerate(filtered[page_now * page_size:(page_now + 1) * page_size],
+                                         start=page_now * page_size):
+                label = account["Username"] + (f" · {account['Alias']}" if account["Alias"] else "")
+                rows.append([(label[:60], f"ram:a:{nonce}:{i}")])
+            nav = []
+            if page_now:
+                nav.append(("◀️", f"ram:p:{nonce}:{page_now - 1}"))
+            nav.append((f"{page_now + 1}/{page_count}", "ram:noop"))
+            if page_now + 1 < page_count:
+                nav.append(("▶️", f"ram:p:{nonce}:{page_now + 1}"))
+            rows.append(nav)
+            rows.append([("🔄 Обновить", "ram:refresh"), ("↩️ RAM", "ram:open")])
+            title = f"📋 Аккаунты RAM · {group or 'все группы'}\nНайдено: {len(filtered)}"
+            if not filtered:
+                title += "\n\nАккаунтов нет. Проверь AllowGetAccounts в RAM."
+            self.ram_panel(chat_id, title, inline_keyboard(rows), message_id)
+            return ""
+        self.submit(chat_id, "ram_accounts", f"group={group or 'all'} page={page}", load)
+
+    def ram_account_card(self, chat_id: int, nonce: str, index: int, message_id: int | None = None) -> None:
+        state = self.ram_state.get(chat_id)
+        if not state or state["nonce"] != nonce or index >= len(state["accounts"]):
+            self.send(chat_id, "Список устарел. Обновляю…")
+            self.ram_list(chat_id, message_id=message_id)
+            return
+        account = state["accounts"][index]
+        username = account["Username"]
+        self.ram_selected[chat_id] = username
+        description = account["Description"] or "(нет описания)"
+        fields = account["Fields"]
+        field_names = ", ".join(list(fields)[:12]) if fields else "(нет полей)"
+        text = (f"👤 {username}\n"
+                f"🏷 Алиас: {account['Alias'] or '—'}\n"
+                f"🆔 UserId: {account['UserId'] or '—'}\n"
+                f"📁 Группа: {account['Group']}\n"
+                f"📝 Описание:\n{description[:700]}\n"
+                f"🧩 Поля ({len(fields)}): {field_names}")
+        rows = [
+            [("🚀 Запустить", "ram:act:launch"), ("🌐 VIP-сервер", "ram:act:vip")],
+            [("🎯 Рекоменд. сервер", "ram:act:recommended"), ("👣 Follow user", "ram:act:follow")],
+            [("🏷 Алиас", "ram:act:alias"), ("📝 Описание", "ram:act:description")],
+            [("➕ Дописать описание", "ram:act:append"), ("🖼 Аватар JSON", "ram:act:avatar")],
+            [("🧩 Поля аккаунта", "ram:fields"), ("🚫 Блокировки", "ram:blocked")],
+            [("🔄 Обновить карточку", "ram:reload"), ("↩️ К аккаунтам", "ram:list")],
+        ]
+        self.ram_panel(chat_id, text, inline_keyboard(rows), message_id or state.get("message_id"))
+
+    def ram_fields(self, chat_id: int, message_id: int | None = None) -> None:
+        username = self.ram_selected.get(chat_id)
+        state = self.ram_state.get(chat_id)
+        if not username or not state:
+            self.ram_home(chat_id, message_id)
+            return
+        record = next((a for a in state["accounts"] if a["Username"] == username), None)
+        fields = record["Fields"] if record else {}
+        rows = [[(f"{name[:24]}: {value[:22]}", f"ram:field:{i}"), ("✖", f"ram:fieldrm:{i}")]
+                for i, (name, value) in enumerate(fields.items())]
+        rows += [[("➕ Добавить / изменить поле", "ram:act:fieldset")],
+                 [("↩️ К аккаунту", "ram:back")]]
+        self.ram_panel(chat_id, f"🧩 Поля аккаунта {username}\nВыбери поле, чтобы прочитать значение.",
+                       inline_keyboard(rows), message_id or state.get("message_id"))
+
+    def ram_show_blocked(self, chat_id: int, message_id: int | None = None) -> None:
+        account = self.ram_selected.get(chat_id)
+        if not account:
+            self.ram_home(chat_id, message_id)
+            return
+        def load() -> str:
+            users = self.ram_api.blocked_users(account)
+            rows = [[(f"🧍 {user_id}", f"ram:unblock:{i}")] for i, user_id in enumerate(users[:30])]
+            rows.append([("➕ Заблокировать UserId", "ram:act:block"),
+                         ("♻️ Снять все", "ram:act:unblockall")])
+            rows.append([("↩️ К аккаунту", "ram:back")])
+            self.ram_state.setdefault(chat_id, {})["blocked"] = users
+            self.ram_panel(chat_id, f"🚫 Блокировки · {account}\nВсего: {len(users)}",
+                           inline_keyboard(rows), message_id or self.ram_state.get(chat_id, {}).get("message_id"))
+            return ""
+        self.submit(chat_id, "ram_blocked", f"account={account}", load)
+
+    def ram_reload_card(self, chat_id: int, message_id: int | None = None) -> None:
+        previous = self.ram_state.get(chat_id, {})
+        username, group, page = self.ram_selected.get(chat_id), previous.get("group", ""), previous.get("page", 0)
+        def load() -> str:
+            all_accounts = self.ram_api.accounts()
+            groups = sorted({item["Group"] for item in all_accounts}, key=str.casefold)
+            filtered = [item for item in all_accounts if not group or item["Group"].casefold() == group.casefold()]
+            nonce = secrets.token_hex(3)
+            self.ram_state[chat_id] = {"nonce": nonce, "accounts": filtered, "groups": groups,
+                                       "group": group, "page": page, "message_id": message_id}
+            index = next((i for i, item in enumerate(filtered) if item["Username"] == username), None)
+            if index is None:
+                self.ram_panel(chat_id, "Выбранный аккаунт больше не найден. Список обновлён.",
+                               inline_keyboard([[("📋 Открыть список", "ram:list")]]), message_id)
+                return ""
+            self.ram_account_card(chat_id, nonce, index, message_id)
+            return ""
+        self.submit(chat_id, "ram_refresh_card", f"account={username or ''}", load)
+
     def handle_command(self, chat_id: int, user_id: int, text: str) -> None:
         stripped = text.strip()
         if not stripped:
@@ -645,11 +790,10 @@ class Bot:
         elif cmd == "/ram":
             mode, _, params = arg.partition(" ")
             mode = mode.casefold()
+            if mode == "fieldremove":
+                mode = "field-remove"
             if mode == "accounts":
-                group = params.strip() or "Default"
-                self.submit(chat_id, "ram_accounts", f"group={group}",
-                            lambda: "Аккаунты RAM · группа " + group + ":\n" +
-                            ("\n".join(self.ram_api.accounts(group)) or "(пусто)"))
+                self.ram_list(chat_id, params.strip())
             elif mode == "launch":
                 parts = params.split()
                 if len(parts) not in (2, 3):
@@ -658,11 +802,72 @@ class Bot:
                 job_id = parts[2] if len(parts) == 3 else ""
                 self.submit(chat_id, "ram_launch", f"account={account}, PlaceId={place_id}",
                             lambda: self.ram_api.launch(account, place_id, job_id))
+            elif mode in ("vip", "follow", "server", "recommended", "alias", "description", "append",
+                          "avatar", "field-get", "field-set", "fieldset", "block", "unblock"):
+                account = self.ram_selected.get(chat_id)
+                if not account:
+                    raise ValueError("Сначала выбери аккаунт во вкладке RAM")
+                if mode in ("vip", "server"):
+                    parts = params.split()
+                    if not parts:
+                        raise ValueError("Укажи PlaceId и необязательный JobId")
+                    place_id = parts[0]
+                    job_id = parts[1] if len(parts) > 1 else ""
+                    op = (lambda: self.ram_api.launch(account, place_id, job_id, join_vip=True)) if mode == "vip" else (
+                        lambda: self.ram_api.set_server(account, place_id, job_id))
+                elif mode == "recommended":
+                    place_id = params.strip()
+                    if not place_id:
+                        raise ValueError("Укажи PlaceId")
+                    op = lambda: self.ram_api.set_server(account, place_id, recommended=True)
+                elif mode == "follow":
+                    username = params.strip()
+                    if not username:
+                        raise ValueError("Укажи имя пользователя Roblox")
+                    op = lambda: self.ram_api.follow_user(account, username)
+                elif mode in ("alias", "description", "append", "avatar"):
+                    value = params
+                    if not value:
+                        raise ValueError("Значение пустое")
+                    if mode == "avatar":
+                        op = lambda: self.ram_api.set_avatar(account, value)
+                    else:
+                        endpoint = {"alias": "SetAlias", "description": "SetDescription",
+                                    "append": "AppendDescription"}[mode]
+                        op = lambda: self.ram_api.edit_account(endpoint, account, value)
+                elif mode == "field-get":
+                    field = params.strip()
+                    op = lambda: self.ram_api.field_action("GetField", account, field)
+                elif mode == "field-set":
+                    field, _, value = params.partition(" ")
+                    op = lambda: self.ram_api.field_action("SetField", account, field, value)
+                elif mode == "fieldset":
+                    field, _, value = params.partition(" ")
+                    op = lambda: self.ram_api.field_action("SetField", account, field, value)
+                else:
+                    user_id = params.strip()
+                    endpoint = "BlockUser" if mode == "block" else "UnblockUser"
+                    op = lambda: self.ram_api.user_action(endpoint, account, user_id)
+                self.submit(chat_id, "ram_" + mode, f"account={account}", op)
+            elif mode in ("blocked", "blocklist"):
+                self.ram_show_blocked(chat_id)
+            elif mode == "unblock-all":
+                selected = self.ram_selected.get(chat_id, "")
+                if not selected:
+                    raise ValueError("Сначала выбери аккаунт во вкладке RAM")
+                self.ram_confirm[chat_id] = ("unblock-all", selected, "")
+                self.send(chat_id, "⚠️ Снять блокировку со всех пользователей этого аккаунта?",
+                          inline_keyboard([[ ("✅ Да, снять все", "ram:confirm"), ("Отмена", "ram:back") ]]))
+            elif mode == "field-remove":
+                account = self.ram_selected.get(chat_id)
+                field = params.strip()
+                if not account or not field:
+                    raise ValueError("Нужно выбрать аккаунт и указать имя поля")
+                self.ram_confirm[chat_id] = ("field-remove", account, field)
+                self.send(chat_id, f"Удалить поле «{field}» у {account}?",
+                          inline_keyboard([[ ("🗑 Удалить", "ram:confirm"), ("Отмена", "ram:fields") ]]))
             else:
-                self.send(chat_id, "Выбери действие RAM:", inline_keyboard([
-                    [("👥 Список аккаунтов", "ram:accounts"),
-                     ("🚀 Запустить аккаунт", "prompt:ram:launch")]
-                ]))
+                self.ram_home(chat_id)
         elif cmd == "/scenario":
             mode = arg.casefold()
             if not mode:
@@ -799,6 +1004,18 @@ class Bot:
             "scroll": "количество шагов [X Y]", "key": "клавишу или сочетание через + (например ctrl+shift+s)",
             "file:get": "путь к текстовому файлу",
             "ram:launch": "имя аккаунта, PlaceId и необязательный JobId (пример: MyAccount 1818)",
+            "ram:vip": "PlaceId и необязательный JobId VIP-сервера",
+            "ram:server": "PlaceId и необязательный JobId сервера",
+            "ram:recommended": "PlaceId для рекомендованного сервера",
+            "ram:follow": "имя пользователя Roblox, за которым следовать",
+            "ram:alias": "новый алиас выбранного аккаунта",
+            "ram:description": "новое описание выбранного аккаунта",
+            "ram:append": "текст, который нужно дописать к описанию",
+            "ram:avatar": "JSON аватара для выбранного аккаунта",
+            "ram:fieldset": "имя поля, пробел, значение (пример: note farm-ready)",
+            "ram:fieldremove": "точное имя поля для удаления",
+            "ram:block": "UserId для блокировки",
+            "ram:unblock": "UserId для разблокировки",
         }
         self.send(chat_id, f"Пришли {descriptions.get(command, 'аргументы')} следующим сообщением. /cancel — отмена.")
 
@@ -847,8 +1064,102 @@ class Bot:
             self.send(chat_id, "Выбери действие. После выполнения придёт скриншот.", inline_keyboard(rows))
         elif data == "launches":
             self.apps(chat_id)
+        elif data == "menu":
+            self.send(chat_id, "Управление основным ПК. Выбери действие:", menu())
+        elif data == "ram:open":
+            self.ram_home(chat_id, query.get("message", {}).get("message_id"))
+        elif data in ("ram:list", "ram:refresh"):
+            state = self.ram_state.get(chat_id, {})
+            self.ram_list(chat_id, state.get("group", "") if data == "ram:refresh" else "",
+                          state.get("page", 0) if data == "ram:refresh" else 0,
+                          query.get("message", {}).get("message_id"))
+        elif data == "ram:noop":
+            return
+        elif data.startswith("ram:g:"):
+            _, _, nonce, choice = data.split(":", 3)
+            state = self.ram_state.get(chat_id, {})
+            if state.get("nonce") != nonce:
+                self.ram_list(chat_id, message_id=query.get("message", {}).get("message_id"))
+            else:
+                group = "" if choice == "*" else state["groups"][int(choice)]
+                self.ram_list(chat_id, group, 0, query.get("message", {}).get("message_id"))
+        elif data.startswith("ram:p:"):
+            _, _, nonce, page = data.split(":", 3)
+            state = self.ram_state.get(chat_id, {})
+            if state.get("nonce") == nonce:
+                self.ram_list(chat_id, state.get("group", ""), int(page),
+                              query.get("message", {}).get("message_id"))
+        elif data.startswith("ram:a:"):
+            _, _, nonce, index = data.split(":", 3)
+            self.ram_account_card(chat_id, nonce, int(index), query.get("message", {}).get("message_id"))
+        elif data == "ram:reload":
+            self.ram_reload_card(chat_id, query.get("message", {}).get("message_id"))
+        elif data == "ram:fields":
+            self.ram_fields(chat_id, query.get("message", {}).get("message_id"))
+        elif data == "ram:blocked":
+            self.ram_show_blocked(chat_id, query.get("message", {}).get("message_id"))
+        elif data == "ram:back":
+            state = self.ram_state.get(chat_id, {})
+            username = self.ram_selected.get(chat_id)
+            account = next((a for a in state.get("accounts", []) if a["Username"] == username), None)
+            if account:
+                self.ram_account_card(chat_id, state["nonce"], state["accounts"].index(account),
+                                      query.get("message", {}).get("message_id"))
+            else:
+                self.ram_home(chat_id, query.get("message", {}).get("message_id"))
+        elif data.startswith("ram:field:"):
+            state = self.ram_state.get(chat_id, {})
+            account = self.ram_selected.get(chat_id)
+            record = next((a for a in state.get("accounts", []) if a["Username"] == account), None)
+            if record:
+                keys = list(record["Fields"])
+                field = keys[int(data.rsplit(":", 1)[1])]
+                self.submit(chat_id, "ram_field", f"account={account} field={field}",
+                            lambda: f"{field}: {self.ram_api.field_action('GetField', account, field)}")
+        elif data.startswith("ram:fieldrm:"):
+            state = self.ram_state.get(chat_id, {})
+            username = self.ram_selected.get(chat_id)
+            record = next((a for a in state.get("accounts", []) if a["Username"] == username), None)
+            if record:
+                fields = list(record["Fields"])
+                field = fields[int(data.rsplit(":", 1)[1])]
+                self.ram_confirm[chat_id] = ("field-remove", username, field)
+                self.send(chat_id, f"Удалить поле «{field}» у {username}?",
+                          inline_keyboard([[ ("🗑 Удалить", "ram:confirm"), ("Отмена", "ram:fields") ]]))
+        elif data.startswith("ram:unblock:"):
+            users = self.ram_state.get(chat_id, {}).get("blocked", [])
+            index = int(data.rsplit(":", 1)[1])
+            account = self.ram_selected.get(chat_id, "")
+            if index < len(users):
+                user_id = users[index]
+                self.submit(chat_id, "ram_unblock", f"account={account} user={user_id}",
+                            lambda: self.ram_api.user_action("UnblockUser", account, user_id))
+        elif data.startswith("ram:act:"):
+            action = data.rsplit(":", 1)[1]
+            prompts = {"launch": "ram:launch", "vip": "ram:vip", "server": "ram:server",
+                       "recommended": "ram:recommended", "follow": "ram:follow", "alias": "ram:alias",
+                       "description": "ram:description", "append": "ram:append", "avatar": "ram:avatar",
+                       "fieldset": "ram:fieldset", "fieldremove": "ram:fieldremove", "block": "ram:block",
+                       "unblock": "ram:unblock"}
+            if action == "unblockall":
+                account = self.ram_selected.get(chat_id, "")
+                self.ram_confirm[chat_id] = ("unblock-all", account, "")
+                self.send(chat_id, f"⚠️ Снять все блокировки у {account}?",
+                          inline_keyboard([[ ("✅ Подтвердить", "ram:confirm"), ("Отмена", "ram:blocked") ]]))
+            elif action in prompts:
+                self.prompt(chat_id, prompts[action])
+        elif data == "ram:confirm":
+            confirmation = self.ram_confirm.pop(chat_id, None)
+            if confirmation:
+                action, account, field = confirmation
+                if action == "unblock-all":
+                    self.submit(chat_id, "ram_unblock_all", f"account={account}",
+                                lambda: self.ram_api.user_action("UnblockEveryone", account))
+                else:
+                    self.submit(chat_id, "ram_field_remove", f"account={account} field={field}",
+                                lambda: self.ram_api.field_action("RemoveField", account, field))
         elif data == "ram:accounts":
-            self.handle_command(chat_id, user_id, "/ram accounts")
+            self.ram_list(chat_id, message_id=query.get("message", {}).get("message_id"))
         elif data.startswith("catalog-page:"):
             _, nonce, page = data.split(":", 2)
             self.app_page(chat_id, int(page), nonce)

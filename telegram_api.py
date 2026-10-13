@@ -14,6 +14,7 @@ class TelegramError(RuntimeError):
 
 class TelegramAPI:
     def __init__(self, token: str, proxy_url: str | None = None):
+        self.token = token
         self.base = f"https://api.telegram.org/bot{token}/"
         self.proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
@@ -75,6 +76,30 @@ class TelegramAPI:
             caption=caption[:1024],
             files={"document": (filename, BytesIO(data), "application/octet-stream")},
         )
+
+    def download_document(self, file_id: str, max_bytes: int = 1_000_000) -> tuple[bytes, str]:
+        metadata = self.call("getFile", file_id=file_id)
+        file_path = metadata.get("file_path", "")
+        if not file_path or int(metadata.get("file_size", 0)) > max_bytes:
+            raise TelegramError("Файл пустой или превышает ограничение 1 МБ")
+        # The Bot API file URL includes the bot token. Do not include it in
+        # logs or exceptions; fetch through the configured Telegram proxy.
+        try:
+            response = requests.get(
+                f"https://api.telegram.org/file/bot{self.token}/{file_path}",
+                timeout=60, proxies=self.proxies, stream=True,
+            )
+            response.raise_for_status()
+            chunks = bytearray()
+            for chunk in response.iter_content(64 * 1024):
+                chunks.extend(chunk)
+                if len(chunks) > max_bytes:
+                    raise TelegramError("Файл превышает ограничение 1 МБ")
+            return bytes(chunks), file_path.rsplit("/", 1)[-1]
+        except TelegramError:
+            raise
+        except requests.RequestException as exc:
+            raise TelegramError(f"Не удалось скачать файл из Telegram: {type(exc).__name__}") from None
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         self.call("answerCallbackQuery", callback_query_id=callback_id, text=text[:200])

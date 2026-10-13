@@ -31,6 +31,8 @@ class Config:
     cmd_timeout: int
     tesseract_path: str
     proxy_url: str | None = field(default=None, repr=False)
+    ram_api_port: int = 8080
+    ram_api_password: str | None = field(default=None, repr=False)
 
 
 def validate_proxy_url(raw: str) -> str | None:
@@ -65,10 +67,18 @@ def read_config() -> Config:
     timeout = int(os.getenv("CMD_TIMEOUT_SECONDS", "120"))
     if not 5 <= timeout <= 3600:
         raise ValueError("CMD_TIMEOUT_SECONDS должен быть от 5 до 3600")
+    ram_port = int(os.getenv("RAM_API_PORT", "8080"))
+    if not 1 <= ram_port <= 65535:
+        raise ValueError("RAM_API_PORT должен быть от 1 до 65535")
+    ram_password = os.getenv("RAM_API_PASSWORD", "").strip() or None
+    if ram_password and (len(ram_password) < 6 or not ram_password.isalnum()):
+        raise ValueError("RAM_API_PASSWORD в RAM должен быть не короче 6 символов и содержать только буквы и цифры")
     return Config(
         token=token,
         allowed_user_id=int(user_id),
         cmd_timeout=timeout,
         tesseract_path=os.getenv("TESSERACT_PATH", "tesseract").strip(),
         proxy_url=validate_proxy_url(os.getenv("TELEGRAM_PROXY_URL", "")),
+        ram_api_port=ram_port,
+        ram_api_password=ram_password,
     )

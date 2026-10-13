@@ -84,3 +84,28 @@ def replace_text_file(raw_path: str, data: bytes) -> str:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
     return f"Сохранено: {target}\nРезервная копия: {backup if backup.exists() else 'не требовалась'}"
+
+
+def replace_text_message(raw_path: str, message: str) -> str:
+    """Save Telegram message text while retaining the file's newline convention."""
+    target = validate_text_path(raw_path)
+    normalized = message.replace("\r\n", "\n").replace("\r", "\n")
+    encoding = "utf-8"
+    newline = "\n"
+    if target.is_file():
+        original = target.read_bytes()
+        _validate_text(original)
+        if original.startswith(b"\xef\xbb\xbf"):
+            encoding = "utf-8-sig"
+        else:
+            try:
+                original.decode("utf-8")
+            except UnicodeDecodeError:
+                encoding = "cp1251"
+        if original.count(b"\r\n") > 0 and original.count(b"\n") == original.count(b"\r\n"):
+            newline = "\r\n"
+    try:
+        data = normalized.replace("\n", newline).encode(encoding)
+    except UnicodeEncodeError:
+        raise ValueError("Файл в кодировке CP1251 не поддерживает часть символов сообщения") from None
+    return replace_text_file(raw_path, data)

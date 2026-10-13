@@ -69,7 +69,7 @@ def menu() -> dict:
         [("⌨️ CMD", "console:on"), ("🚀 Запуск", "launches")],
         [("▶️ Фарм", "scenario:start"), ("⏹ Стоп фарма", "scenario:stop")],
         [("🤖 Roblox Account Manager", "ram:open")],
-        [("📝 Текстовый файл", "prompt:file:get")],
+        [("📝 Текстовый файл", "file:menu")],
         [("📊 Система", "system"), ("📜 Журнал", "logs")],
         [("🛑 Стоп", "stop"), ("❓ Помощь", "help")],
     ])
@@ -90,8 +90,10 @@ HELP = """Все команды бота:
 /scenario start|stop — запустить фарм или остановить его, закрыв прочие программы.
 /file get ПУТЬ — отправить текстовый файл из ПК в Telegram для редактирования.
 /file save ПУТЬ — ждать загруженный текстовый документ и заменить файл; создаёт .bak.
+/file text ПУТЬ — ждать текстовое сообщение и сохранить его как файл с переносами строк; создаёт .bak.
 /ram — открыть вкладку Roblox Account Manager.
 /ram accounts [группа] — показать аккаунты RAM с описаниями, можно указать группу.
+/ram list [группа] — прислать обычным сообщением список «нейм — описание».
 /ram launch ИМЯ PlaceId [JobId] — запустить аккаунт RAM в указанную игру/сервер.
 /ram vip PlaceId [JobId] — запустить выбранный аккаунт в VIP-сервер.
 /ram server PlaceId [JobId] — назначить сервер выбранному аккаунту.
@@ -191,6 +193,11 @@ class Bot:
     def save_text_document(self, chat_id: int, raw_path: str, file_id: str) -> str:
         data, _ = self.api.download_document(file_id, text_files.MAX_FILE_BYTES)
         result = text_files.replace_text_file(raw_path, data)
+        self.pending.pop(chat_id, None)
+        return result
+
+    def save_text_message(self, chat_id: int, raw_path: str, content: str) -> str:
+        result = text_files.replace_text_message(raw_path, content)
         self.pending.pop(chat_id, None)
         return result
 
@@ -586,6 +593,7 @@ class Bot:
     def ram_home(self, chat_id: int, message_id: int | None = None) -> None:
         keyboard = inline_keyboard([
             [("📋 Аккаунты", "ram:list"), ("🔄 Обновить", "ram:refresh")],
+            [("📄 Нейм — описание", "ram:textlist:all")],
             [("⬅️ Главное меню", "menu")],
         ])
         self.ram_panel(chat_id, "🤖 Roblox Account Manager\n\nВыбери аккаунты для просмотра и управления.\n"
@@ -621,6 +629,7 @@ class Bot:
             if page_now + 1 < page_count:
                 nav.append(("▶️", f"ram:p:{nonce}:{page_now + 1}"))
             rows.append(nav)
+            rows.append([("📄 Список текстом", "ram:textlist")])
             rows.append([("🔄 Обновить", "ram:refresh"), ("↩️ RAM", "ram:open")])
             title = f"📋 Аккаунты RAM · {group or 'все группы'}\nНайдено: {len(filtered)}"
             if not filtered:
@@ -628,6 +637,16 @@ class Bot:
             self.ram_panel(chat_id, title, inline_keyboard(rows), message_id)
             return ""
         self.submit(chat_id, "ram_accounts", f"group={group or 'all'} page={page}", load)
+
+    def ram_text_list(self, chat_id: int, group: str = "") -> None:
+        def load() -> str:
+            accounts = self.ram_api.accounts(group)
+            if not accounts:
+                return f"Аккаунты RAM · {group or 'все группы'}: список пуст."
+            lines = [f"{item['Username']} — {' '.join(item['Description'].splitlines()).strip() or '—'}"
+                     for item in accounts]
+            return f"Аккаунты RAM · {group or 'все группы'} ({len(accounts)}):\n" + "\n".join(lines)
+        self.submit(chat_id, "ram_text_list", f"group={group or 'all'}", load)
 
     def ram_account_card(self, chat_id: int, nonce: str, index: int, message_id: int | None = None) -> None:
         state = self.ram_state.get(chat_id)
@@ -788,8 +807,14 @@ class Bot:
                 self.pending[chat_id] = f"file:save:{raw_path.strip()}"
                 self.send(chat_id, "Теперь отправь текстовый файл документом (до 1 МБ). "
                           "Текущий файл будет сохранён как .bak.")
+            elif mode == "text" and raw_path.strip():
+                text_files.validate_text_path(raw_path.strip())
+                self.pending[chat_id] = f"file:text:{raw_path.strip()}"
+                self.send(chat_id, "Теперь пришли содержимое файла одним текстовым сообщением. "
+                          "Обычные переносы строк сохранятся; у существующего файла сохранится стиль переносов. "
+                          "Перед заменой будет создан .bak. /cancel — отмена.")
             else:
-                raise ValueError("Формат: /file get ПУТЬ или /file save ПУТЬ")
+                raise ValueError("Формат: /file get|save|text ПУТЬ")
         elif cmd == "/ram":
             mode, _, params = arg.partition(" ")
             mode = mode.casefold()
@@ -797,6 +822,8 @@ class Bot:
                 mode = "field-remove"
             if mode == "accounts":
                 self.ram_list(chat_id, params.strip())
+            elif mode == "list":
+                self.ram_text_list(chat_id, params.strip())
             elif mode == "launch":
                 parts = params.split()
                 if len(parts) not in (2, 3):
@@ -1006,6 +1033,8 @@ class Bot:
             "zoom": "X Y [размер 100–600] для приближения области",
             "scroll": "количество шагов [X Y]", "key": "клавишу или сочетание через + (например ctrl+shift+s)",
             "file:get": "путь к текстовому файлу",
+            "file:save": "путь к текстовому файлу для замены документом",
+            "file:text": "путь к текстовому файлу для записи сообщением",
             "ram:launch": "имя аккаунта, PlaceId и необязательный JobId (пример: MyAccount 1818)",
             "ram:vip": "PlaceId и необязательный JobId VIP-сервера",
             "ram:server": "PlaceId и необязательный JobId сервера",
@@ -1067,10 +1096,21 @@ class Bot:
             self.send(chat_id, "Выбери действие. После выполнения придёт скриншот.", inline_keyboard(rows))
         elif data == "launches":
             self.apps(chat_id)
+        elif data == "file:menu":
+            self.send(chat_id, "Текстовые файлы · выбери действие:", inline_keyboard([
+                [("📤 Получить файл", "prompt:file:get")],
+                [("📝 Записать сообщением", "prompt:file:text")],
+                [("📥 Заменить документом", "prompt:file:save")],
+                [("⬅️ Главное меню", "menu")],
+            ]))
         elif data == "menu":
             self.send(chat_id, "Управление основным ПК. Выбери действие:", menu())
         elif data == "ram:open":
             self.ram_home(chat_id, query.get("message", {}).get("message_id"))
+        elif data == "ram:textlist":
+            self.ram_text_list(chat_id, self.ram_state.get(chat_id, {}).get("group", ""))
+        elif data == "ram:textlist:all":
+            self.ram_text_list(chat_id)
         elif data in ("ram:list", "ram:refresh"):
             state = self.ram_state.get(chat_id, {})
             self.ram_list(chat_id, state.get("group", "") if data == "ram:refresh" else "",
@@ -1252,7 +1292,8 @@ class Bot:
         if message:
             request = message.get("text", "")
             head = request.split(" ", 1)[0].lower()
-            hidden = head in ("/text", "/paste") or (
+            waiting_for_text_file = self.pending.get(chat_id, "").startswith("file:text:")
+            hidden = (waiting_for_text_file and head != "/cancel") or head in ("/text", "/paste") or (
                 head == "/clipboard" and request.casefold().startswith("/clipboard set ")
             ) or (
                 not head.startswith("/") and self.pending.get(chat_id) in ("text", "paste", "clipboard:set")
@@ -1271,6 +1312,7 @@ class Bot:
                 text = message.get("text", "")
                 document = message.get("document")
                 waiting_for_file = self.pending.get(chat_id, "").startswith("file:save:")
+                waiting_for_text_file = self.pending.get(chat_id, "").startswith("file:text:")
                 if document and waiting_for_file:
                     raw_path = self.pending[chat_id].partition(":")[2].partition(":")[2]
                     if int(document.get("file_size", 0)) > text_files.MAX_FILE_BYTES:
@@ -1281,6 +1323,14 @@ class Bot:
                     return
                 elif document:
                     self.send(chat_id, "Для загрузки файла сначала укажи назначение: /file save ПУТЬ")
+                    return
+                elif waiting_for_text_file and text != "/cancel":
+                    raw_path = self.pending[chat_id][len("file:text:"):]
+                    if not text:
+                        self.send(chat_id, "Жду текстовое сообщение с содержимым файла. /cancel — отмена.")
+                        return
+                    self.submit(chat_id, "file_text", raw_path,
+                                lambda: self.save_text_message(chat_id, raw_path, text))
                     return
                 elif waiting_for_file and not text.startswith("/"):
                     self.send(chat_id, "Жду текстовый документ. /cancel — отменить загрузку.")

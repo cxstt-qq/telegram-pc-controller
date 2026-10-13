@@ -34,7 +34,7 @@ class RamApi:
         self.session.trust_env = False
 
     def request(self, endpoint: str, params: dict[str, str] | None = None,
-                body: dict[str, str] | None = None) -> str:
+                body: dict[str, str] | str | None = None) -> str:
         method = self.METHODS.get(endpoint)
         if method is None:
             raise ValueError("Unsupported RAM API method")
@@ -44,7 +44,13 @@ class RamApi:
         try:
             url = urljoin(self.base, endpoint)
             if method == "POST":
-                response = self.session.post(url, params=params, data=body or {}, timeout=8)
+                if isinstance(body, str):
+                    response = self.session.post(
+                        url, params=params, data=body.encode("utf-8"),
+                        headers={"Content-Type": "text/plain; charset=utf-8"}, timeout=8,
+                    )
+                else:
+                    response = self.session.post(url, params=params, data=body or {}, timeout=8)
             else:
                 response = self.session.get(url, params=params, timeout=8)
         except requests.RequestException as exc:
@@ -122,7 +128,10 @@ class RamApi:
                       "AppendDescription": "Description"}.get(endpoint)
         if not body_field:
             raise ValueError("Unsupported RAM API method")
-        return self.request(endpoint, {"Account": account}, {body_field: value})[:1000]
+        body: dict[str, str] | str = value if endpoint in {"SetDescription", "AppendDescription"} else {
+            body_field: value
+        }
+        return self.request(endpoint, {"Account": account}, body)[:1000]
 
     def blocked_users(self, account: str) -> list[str]:
         raw = self.request("GetBlockedList", {"Account": account})
